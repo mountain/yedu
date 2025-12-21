@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>理想大陆气候机制模拟器 (Toy Model)</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h2 { color: #333; }
+        .controls { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 800px; margin-bottom: 20px; display: flex; gap: 20px; align-items: center; }
+        canvas { background: #fff; box-shadow: 0 4px 15px rgba(0,0,0,0.1); cursor: crosshair; }
+        .label { font-weight: bold; width: 60px; }
+        input[type=range] { flex-grow: 1; }
+        .info-panel { margin-top: 10px; font-family: monospace; color: #555; }
+        .legend { display: flex; gap: 15px; font-size: 12px; margin-top: 5px;}
+        .legend-item { display: flex; align-items: center; gap: 5px; }
+        .box { width: 12px; height: 12px; }
+    </style>
+</head>
+<body>
+
+    <h2>理想大陆气候机制模拟器 (Toy Model)</h2>
+
+    <div class="controls">
+        <div class="label">月份:</div>
+        <input type="range" id="monthSlider" min="0" max="11" step="0.1" value="0">
+        <div id="monthDisplay" class="label">1月</div>
+        <button onclick="toggleAnim()">⏯ 播放/暂停</button>
+    </div>
+
+    <canvas id="simCanvas" width="800" height="500"></canvas>
+
+    <div class="legend">
+        <div class="legend-item"><div class="box" style="background:#aaddff"></div>海洋</div>
+        <div class="legend-item"><div class="box" style="background:#e0e0e0"></div>大陆(干)</div>
+        <div class="legend-item"><div class="box" style="background:#44aa44"></div>大陆(湿/植被)</div>
+        <div class="legend-item">🔵 降雨区域</div>
+        <div class="legend-item">➡ 风向</div>
+    </div>
+
+    <div class="info-panel" id="debugInfo">鼠标悬停查看详细参数...</div>
+
+<script>
+/**
+ * 核心逻辑：明理，这里是我们讨论的物理机制的代码化。
+ * 我们主要模拟：
+ * 1. 气压带随季节移动 (Belt Shift)
+ * 2. 风向判定 (Wind Vector)
+ * 3. 降水判定 (Precipitation = Convection + Advection)
+ */
+
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+const width = 800;
+const height = 500;
+const cols = 40;
+const rows = 25;
+const cellW = width / cols;
+const cellH = height / rows;
+
+// 状态变量
+let month = 0; // 0-11
+let animating = true;
+
+// 理想大陆定义 (中间一块矩形)
+const landMask = new Array(cols * rows).fill(0);
+for(let y = 5; y < rows - 5; y++) {
+    for(let x = 10; x < cols - 10; x++) {
+        landMask[y * cols + x] = 1;
+    }
+}
+
+// 辅助函数：将网格Y坐标转换为纬度 (-90 ~ 90)
+function getLat(y) {
+    return 90 - (y / rows) * 180;
+}
+
+// 核心物理计算
+function calculateCell(x, y, currentMonth) {
+    const lat = getLat(y);
+    const isLand = landMask[y * cols + x] === 1;
+
+    // 1. 季节偏移因子 (Seasonality)
+    // 太阳直射点在 -23.5 到 23.5 之间移动。滞后约1个月。
+    // month 0 = Jan (Winter in NH), month 6 = July (Summer in NH)
+    const seasonOffset = -23.5 * Math.cos((currentMonth / 12) * 2 * Math.PI);
+
+    // 气压带中心 (随季节移动)
+    const itczLat = seasonOffset; // 赤道低压带
+    const subHighLatN = 30 + seasonOffset * 0.5; // 副高移动幅度通常比直射点小
+    const subHighLatS = -30 + seasonOffset * 0.5;
+
+    // 2. 基础行星风系 (Planetary Wind)
+    let u = 0; // 纬向风 (正=西风, 负=东风)
+    let v = 0; // 经向风 (正=南风, 负=北风)
+
+    // 简单三圈环流逻辑
+    if (Math.abs(lat - itczLat) < 10) {
+        // 赤道无风带/上升气流
+        u = -2; // 弱东风
+    } else if (lat > subHighLatN + 5 || lat < subHighLatS - 5) {
+        // 中纬度西风带 (Westerlies)
+        u = 8;
+        v = (lat > 0) ? 2 : -2; // 略微偏极地
+    } else {
+        // 低纬度信风带 (Trade Winds)
+        u = -8; // 东风
+        v = (lat > 0) ? -2 : 2; // 指向赤道
+    }
+
+    // 3. 季风效应 (Monsoon Effect - Thermal Contrast)
+    // 夏季大陆热 -> 低压 -> 吸风; 冬季大陆冷 -> 高压 -> 吹风
+    if (isLand || isCoastal(x,y)) {
+        const landTempDiff = (lat > 0) ? Math.sin(((currentMonth-3)/12)*2*Math.PI) : Math.sin(((currentMonth-9)/12)*2*Math.PI);
+        // 如果 landTempDiff > 0 (Summer), 陆地低压, 风吹向内陆
+        // 这是一个简化的扰动场
+        // 这里主要模拟东岸的季风显著性
+        if (x > cols/2) { // 东半部
+             u += landTempDiff * -5; // 夏季加强东风(海->陆), 冬季加强西风(陆->海)
+        }
+    }
+
+    // 4. 降水判定 (Precipitation Logic)
+    let precip = 0;
+
+    // A. 对流雨 (ITCZ)
+    if (Math.abs(lat - itczLat) < 8) precip += 10;
+
+    // B. 锋面雨 (西风带)
+    if (Math.abs(lat) > 40 && Math.abs(lat) < 65) precip += 5;
+
+    // C. 副高控制 (下沉干旱)
+    if (Math.abs(lat - subHighLatN) < 8 || Math.abs(lat - subHighLatS) < 8) precip -= 10;
+
+    // D. 地形/平流雨 (Advection)
+    // 检查上游网格是否是海洋。如果是海风吹向陆地 -> 湿。陆吹向海 -> 干。
+    let upstreamIsSea = false;
+    if (u > 0) { // 西风，看左边
+        upstreamIsSea = (x > 0 && landMask[y*cols + (x-1)] === 0);
+    } else { // 东风，看右边
+        upstreamIsSea = (x < cols-1 && landMask[y*cols + (x+1)] === 0);
+    }
+
+    if (isLand && upstreamIsSea) precip += 8; // 迎风坡
+    if (isLand && !upstreamIsSea) precip -= 5; // 离岸风或内陆
+
+    // 归一化
+    if (precip < 0) precip = 0;
+
+    return { lat, isLand, u, v, precip };
+}
+
+// 辅助：判断是否在海岸线附近
+function isCoastal(x, y) {
+    if (landMask[y*cols+x] === 1) return false;
+    // 简单检查邻居
+    return (x>0 && landMask[y*cols+x-1]) || (x<cols-1 && landMask[y*cols+x+1]);
+}
+
+function draw() {
+    ctx.clearRect(0, 0, width, height);
+
+    for(let y = 0; y < rows; y++) {
+        for(let x = 0; x < cols; x++) {
+            const cell = calculateCell(x, y, month);
+
+            // 绘制底色 (Land vs Ocean)
+            if (cell.isLand) {
+                // 根据降水改变陆地颜色 (Visualizing Climate Type)
+                if (cell.precip > 5) ctx.fillStyle = "#44aa44"; // 湿润/森林
+                else if (cell.precip > 2) ctx.fillStyle = "#aaaa44"; // 草原
+                else ctx.fillStyle = "#e0e0e0"; // 荒漠
+            } else {
+                ctx.fillStyle = "#aaddff"; // 海洋
+            }
+            ctx.fillRect(x*cellW, y*cellH, cellW, cellH);
+
+            // 绘制降水 (Rain overlay)
+            if (cell.precip > 0) {
+                ctx.fillStyle = `rgba(0, 0, 255, ${Math.min(cell.precip / 15, 0.6)})`;
+                ctx.fillRect(x*cellW, y*cellH, cellW, cellH);
+            }
+
+            // 绘制风场箭头 (Wind Vectors)
+            // 为了视觉清晰，不用每个格子都画
+            if (x % 2 === 0 && y % 2 === 0) {
+                drawArrow(ctx, x*cellW + cellW/2, y*cellH + cellH/2, cell.u, cell.v);
+            }
+        }
+    }
+
+    // 绘制纬度线和标记
+    ctx.strokeStyle = "rgba(0,0,0,0.1)";
+    ctx.beginPath();
+    // 赤道
+    let eqY = height / 2;
+    ctx.moveTo(0, eqY); ctx.lineTo(width, eqY);
+    ctx.stroke();
+    ctx.fillStyle = "#000";
+    ctx.fillText("0°", 5, eqY - 2);
+
+    // 30度
+    let h30 = height * (60/180);
+    ctx.fillText("30°N", 5, h30 - 2);
+    ctx.fillText("30°S", 5, height - h30 - 2);
+
+    updateUI();
+}
+
+function drawArrow(ctx, x, y, u, v) {
+    const mag = Math.sqrt(u*u + v*v);
+    if (mag < 0.1) return;
+
+    const scale = 1.5; // 箭头长度缩放
+    const angle = Math.atan2(v, u);
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(-5 * scale, 0);
+    ctx.lineTo(5 * scale, 0);
+    ctx.lineTo(2 * scale, -2 * scale);
+    ctx.moveTo(5 * scale, 0);
+    ctx.lineTo(2 * scale, 2 * scale);
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+}
+
+function updateUI() {
+    document.getElementById('monthDisplay').innerText = Math.floor(month + 1) + "月";
+    document.getElementById('monthSlider').value = month;
+}
+
+function loop() {
+    if (animating) {
+        month += 0.05;
+        if (month >= 12) month = 0;
+    }
+    draw();
+    requestAnimationFrame(loop);
+}
+
+// 交互控制
+document.getElementById('monthSlider').addEventListener('input', (e) => {
+    month = parseFloat(e.target.value);
+    animating = false; // 用户拖动时暂停
+    draw();
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / cellW);
+    const y = Math.floor((e.clientY - rect.top) / cellH);
+    if (x >=0 && x < cols && y >=0 && y < rows) {
+        const cell = calculateCell(x, y, month);
+        const lat = Math.round(cell.lat);
+        document.getElementById('debugInfo').innerText =
+            `Lat: ${lat}° | 类型: ${cell.isLand?'陆地':'海洋'} | 风速 U:${cell.u.toFixed(1)} | 降水指数: ${cell.precip.toFixed(1)}`;
+    }
+});
+
+function toggleAnim() {
+    animating = !animating;
+    if (animating) loop();
+}
+
+// 启动
+landMask[10] = 0; // 测试
+loop();
+
+</script>
+</body>
+</html>

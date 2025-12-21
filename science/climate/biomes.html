@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>理想大陆：气候与植被带标准模型</title>
+    <style>
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #2c3e50; color: #ecf0f1; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h2 { margin-bottom: 10px; }
+        .main-container { background: #34495e; padding: 25px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+        .controls { background: #465c71; padding: 15px; border-radius: 8px; margin-bottom: 15px; display: flex; gap: 15px; align-items: center; }
+        canvas { background: #fff; border-radius: 4px; cursor: crosshair; display: block; }
+        .label { font-weight: bold; width: 50px; }
+        input[type=range] { flex-grow: 1; cursor: pointer; }
+        button { padding: 8px 15px; background: #3498db; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        button:hover { background: #2980b9; }
+
+        .legend-container { display: flex; gap: 20px; margin-top: 15px; flex-wrap: wrap; justify-content: center;}
+        .legend-group { border-right: 1px solid #576c81; padding-right: 15px; }
+        .legend-group:last-child { border-right: none; }
+        .legend-title { font-size: 12px; color: #bdc3c7; margin-bottom: 5px; }
+        .legend { display: grid; grid-template-columns: repeat(3, auto); gap: 8px 12px; font-size: 12px; }
+        .legend-item { display: flex; align-items: center; gap: 6px; }
+        .box { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.1); }
+
+        .info-panel { margin-top: 15px; padding: 10px; background: #2c3e50; border-radius: 4px; font-family: 'Fira Code', monospace; font-size: 13px; color: #bdc3c7; text-align: center; min-height: 20px;}
+    </style>
+</head>
+<body>
+
+    <h2>理想大陆：气候与植被带标准模型</h2>
+
+    <div class="main-container">
+        <div class="controls">
+            <div class="label">月份:</div>
+            <input type="range" id="monthSlider" min="0" max="11" step="0.1" value="0">
+            <div id="monthDisplay" class="label" style="width: 60px; text-align:right;">1月</div>
+            <button onclick="toggleAnim()">⏯ 播放/暂停</button>
+        </div>
+
+        <canvas id="simCanvas" width="800" height="500"></canvas>
+
+        <div class="info-panel" id="debugInfo">鼠标悬停查看详细地理与气候参数...</div>
+
+        <div class="legend-container">
+            <div class="legend-group">
+                <div class="legend-title">非地带性与动力要素</div>
+                <div class="legend">
+                    <div class="legend-item"><div class="box" style="background:#64B5F6"></div>海洋</div>
+                    <div class="legend-item"><div class="box" style="background:rgba(25, 118, 210, 0.6)"></div>当前降水区</div>
+                    <div class="legend-item">➡ 盛行风向</div>
+                </div>
+            </div>
+            <div class="legend-group">
+                 <div class="legend-title">标准植被带 (底色)</div>
+                 <div class="legend">
+                    <div class="legend-item"><div class="box" style="background:#E0F7FA"></div>冰原/苔原</div>
+                    <div class="legend-item"><div class="box" style="background:#2E7D32"></div>亚寒带针叶林</div>
+                    <div class="legend-item"><div class="box" style="background:#66BB6A"></div>温带落叶阔叶林</div>
+                    <div class="legend-item"><div class="box" style="background:#FFEE58"></div>温带草原/荒漠</div>
+                    <div class="legend-item"><div class="box" style="background:#827717"></div>亚热带硬叶林(西)</div>
+                    <div class="legend-item"><div class="box" style="background:#00C853"></div>亚热带阔叶林(东)</div>
+                    <div class="legend-item"><div class="box" style="background:#FFD54F"></div>热带荒漠</div>
+                    <div class="legend-item"><div class="box" style="background:#CDDC39"></div>热带草原</div>
+                    <div class="legend-item"><div class="box" style="background:#1B5E20"></div>热带雨林/季雨林</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+// --- 配置与全局变量 ---
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+const width = 800;
+const height = 500;
+const cols = 60; // 增加网格密度以获得更好的边界分辨率
+const rows = 40;
+const cellW = width / cols;
+const cellH = height / rows;
+
+let month = 6.0; // 从7月开始，对比更明显
+let animating = true;
+
+// 定义大陆区域 (居中矩形)
+const landMask = new Array(cols * rows).fill(0);
+const landStartX = Math.floor(cols * 0.15);
+const landEndX = Math.floor(cols * 0.85);
+const landStartY = Math.floor(rows * 0.1);
+const landEndY = Math.floor(rows * 0.9);
+
+for(let y = landStartY; y < landEndY; y++) {
+    for(let x = landStartX; x < landEndX; x++) {
+        landMask[y * cols + x] = 1;
+    }
+}
+
+// 植被带颜色调色板 (Palette)
+const BIOME_COLORS = {
+    OCEAN: "#64B5F6",
+    ICE_TUNDRA: "#E0F7FA",
+    TAIGA: "#2E7D32", // 针叶林深绿
+    TEMP_DECIDUOUS: "#66BB6A", // 温带落叶中绿
+    TEMP_GRASS_DESERT: "#FFEE58", // 温带草原黄
+    SUBTROP_SCLERO: "#827717", // 亚热带硬叶林橄榄绿 (地中海)
+    SUBTROP_BROAD: "#00C853", // 亚热带阔叶林翠绿 (季风)
+    TROP_DESERT: "#FFD54F", // 热带荒漠沙黄
+    SAVANNA: "#CDDC39", // 热带草原黄绿
+    RAINFOREST: "#1B5E20" // 热带雨林深墨绿
+};
+
+// --- 核心计算逻辑 ---
+
+// 辅助：Y坐标转纬度
+function getLat(y) { return 90 - (y / rows) * 180; }
+
+// 核心1：物理机制计算 (计算瞬时风和降水)
+// (这部分沿用上一版逻辑，稍作参数微调以匹配新的网格)
+function calculatePhysics(x, y, currentMonth) {
+    const lat = getLat(y);
+    const isLand = landMask[y * cols + x] === 1;
+
+    // 季节偏移 (滞后约1.5个月)
+    const seasonLag = 1.5;
+    const seasonOffset = -20 * Math.cos(((currentMonth - seasonLag) / 12) * 2 * Math.PI);
+
+    const itczLat = seasonOffset;
+    // 副高移动范围较小
+    const subHighShift = seasonOffset * 0.6;
+    const subHighLatN = 30 + subHighShift;
+    const subHighLatS = -30 + subHighShift;
+
+    let u = 0, v = 0;
+    // 行星风系
+    if (Math.abs(lat - itczLat) < 12) { u = -3; v = (lat>itczLat)?-1:1;} // 赤道无风/弱信风
+    else if (lat > subHighLatN + 8 || lat < subHighLatS - 8) { u = 10; v = (lat>0)?3:-3; } // 西风带 (加强经向分量)
+    else { u = -10; v = (lat>0)?-3:3; } // 信风带
+
+    // 季风效应 (海陆热力性质差异)
+    if (isLand) {
+        // 夏季陆地热(低压)，冬季陆地冷(高压)
+        const landHeatIndex = (lat > 0)
+            ? Math.sin(((currentMonth - seasonLag - 3)/12)*2*Math.PI) // 北半球夏(6-8月)为正
+            : Math.sin(((currentMonth - seasonLag - 9)/12)*2*Math.PI); // 南半球夏(12-2月)为正
+
+        // 简单模拟：热低压吸引气流，冷高压辐散气流
+        // 主要影响东岸季风区
+        if (x > cols/2) {
+             u += landHeatIndex * -8; // 夏季产生强劲东风分量(海->陆)
+             v += landHeatIndex * (lat>0?5:-5); // 夏季产生向极地分量
+        }
+    }
+
+    // 降水判定
+    let precip = 0;
+    // A. 对流雨 (ITCZ)
+    if (Math.abs(lat - itczLat) < 10) precip += 15 - Math.abs(lat - itczLat);
+    // B. 锋面雨 (西风带)
+    if (Math.abs(lat) > 40 && Math.abs(lat) < 65) precip += 8;
+    // C. 副高压制
+    if (Math.abs(lat - subHighLatN) < 10 || Math.abs(lat - subHighLatS) < 10) precip -= 12;
+
+    // D. 地形/平流雨 (关键!)
+    let upstreamIsSea = false;
+    if (u > 2) { // 显著西风
+        upstreamIsSea = (x > 0 && landMask[y*cols + (x-1)] === 0);
+    } else if (u < -2) { // 显著东风
+        upstreamIsSea = (x < cols-1 && landMask[y*cols + (x+1)] === 0);
+    }
+    if (isLand && upstreamIsSea) precip += 12; // 迎风坡增雨显著
+    if (isLand && !upstreamIsSea && Math.abs(lat) < 40) precip -= 5; // 热带亚热带离岸风减雨
+
+    return { lat, isLand, u, v, precip: Math.max(0, precip) };
+}
+
+// 核心2：地理地带性判定 (确定标准植被底色)
+// 这就是实现“标准陈述”矩阵的地方
+function determineBiomeColor(lat, x) {
+    const absLat = Math.abs(lat);
+    const landWidth = landEndX - landStartX;
+    // 计算相对海陆位置 (0.0 = 西岸, 0.5 = 内陆, 1.0 = 东岸)
+    const relativeX = (x - landStartX) / landWidth;
+
+    let biomeColor = BIOME_COLORS.OCEAN; // Should not happen for land cells
+
+    // --- 标准矩阵逻辑 ---
+
+    // 1. 高纬度 / 极地
+    if (absLat > 70) return BIOME_COLORS.ICE_TUNDRA;
+    if (absLat > 60) return BIOME_COLORS.TAIGA; // 亚寒带针叶林
+
+    // 2. 中纬度 (40-60)
+    if (absLat > 40) {
+        if (relativeX < 0.25) return BIOME_COLORS.TEMP_DECIDUOUS; // 西岸温带海洋 -> 落叶林
+        if (relativeX > 0.75) return BIOME_COLORS.TEMP_DECIDUOUS; // 东岸温带季风 -> 落叶林
+        return BIOME_COLORS.TEMP_GRASS_DESERT; // 内陆干旱
+    }
+
+    // 3. 亚热带 (30-40) - 关键的东西差异
+    if (absLat > 30) {
+        if (relativeX < 0.3) return BIOME_COLORS.SUBTROP_SCLERO; // 西岸：地中海 -> 硬叶林 (橄榄绿)
+        if (relativeX > 0.7) return BIOME_COLORS.SUBTROP_BROAD;  // 东岸：亚热带季风 -> 阔叶林 (翠绿)
+        return BIOME_COLORS.TEMP_GRASS_DESERT; // 内陆过渡带
+    }
+
+    // 4. 热带/副热带干旱区 (20-30)
+    if (absLat > 20) {
+        if (relativeX > 0.8) return BIOME_COLORS.RAINFOREST; // 东岸迎风坡特殊湿润带 (如马达加斯加东侧/巴西东南)
+        return BIOME_COLORS.TROP_DESERT; // 回归线大沙漠，西岸加剧
+    }
+
+    // 5. 赤道过渡带 (10-20)
+    if (absLat > 10) {
+        return BIOME_COLORS.SAVANNA; // 热带草原
+    }
+
+    // 6. 赤道低压带 (0-10)
+    return BIOME_COLORS.RAINFOREST; // 热带雨林
+}
+
+// --- 绘图循环 ---
+function draw() {
+    ctx.clearRect(0, 0, width, height);
+
+    for(let y = 0; y < rows; y++) {
+        for(let x = 0; x < cols; x++) {
+            // 1. 计算物理状态
+            const phys = calculatePhysics(x, y, month);
+
+            // 2. 绘制底色 (Base Layer)
+            if (phys.isLand) {
+                // 根据地理位置确定标准植被色
+                ctx.fillStyle = determineBiomeColor(phys.lat, x);
+            } else {
+                ctx.fillStyle = BIOME_COLORS.OCEAN;
+            }
+            ctx.fillRect(x*cellW, y*cellH, cellW, cellH);
+
+            // 3. 绘制降水覆盖层 (Overlay Layer)
+            // 蓝色半透明，透明度随降水量增加
+            if (phys.precip > 0) {
+                // 使用非线性映射让小雨也能看清，大雨不至于太深
+                const alpha = Math.min(0.8, Math.pow(phys.precip / 25, 0.7));
+                ctx.fillStyle = `rgba(25, 118, 210, ${alpha})`;
+                ctx.fillRect(x*cellW, y*cellH, cellW, cellH);
+            }
+
+            // 4. 绘制风向矢量 (稀疏绘制)
+            if (x % 3 === 0 && y % 3 === 0) {
+                drawArrow(ctx, x*cellW + cellW/2, y*cellH + cellH/2, phys.u, phys.v);
+            }
+        }
+    }
+    drawGridOverlay();
+    updateUI();
+}
+
+// --- 辅助绘图函数 ---
+function drawGridOverlay() {
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.beginPath();
+    // 赤道
+    let eqY = height / 2;
+    ctx.moveTo(0, eqY); ctx.lineTo(width, eqY);
+    // 回归线 (约23.5度)
+    let tropicH = height * (23.5/180);
+    ctx.moveTo(0, eqY - tropicH); ctx.lineTo(width, eqY - tropicH);
+    ctx.moveTo(0, eqY + tropicH); ctx.lineTo(width, eqY + tropicH);
+    // 极圈 (约66.5度)
+    let polarH = height * (66.5/180);
+    ctx.moveTo(0, eqY - polarH); ctx.lineTo(width, eqY - polarH);
+    ctx.moveTo(0, eqY + polarH); ctx.lineTo(width, eqY + polarH);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.font = "10px sans-serif";
+    ctx.fillText("EQUATOR", 5, eqY - 2);
+    ctx.fillText("30°N", 5, height * (60/180) - 2);
+    ctx.fillText("60°N", 5, height * (30/180) - 2);
+}
+
+function drawArrow(ctx, x, y, u, v) {
+    const mag = Math.sqrt(u*u + v*v);
+    if (mag < 0.5) return; // 太小的风不画
+    const scale = 1.2;
+    const angle = Math.atan2(v, u);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(-4 * scale, 0); ctx.lineTo(4 * scale, 0); // 箭杆
+    ctx.lineTo(1 * scale, -2.5 * scale); // 箭头翼
+    ctx.moveTo(4 * scale, 0); ctx.lineTo(1 * scale, 2.5 * scale);
+    ctx.strokeStyle = "rgba(255,255,255,0.7)"; // 白色箭头更清晰
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.restore();
+}
+
+// --- UI与交互 ---
+function updateUI() {
+    const monthFloored = Math.floor(month) % 12;
+    const monthNames = ["1月 (冬)", "2月", "3月", "4月", "5月", "6月", "7月 (夏)", "8月", "9月", "10月", "11月", "12月"];
+    document.getElementById('monthDisplay').innerText = monthNames[monthFloored];
+    document.getElementById('monthSlider').value = month;
+}
+
+function loop() {
+    if (animating) {
+        month += 0.03; // 减慢播放速度
+        if (month >= 12) month = 0;
+    }
+    draw();
+    requestAnimationFrame(loop);
+}
+
+document.getElementById('monthSlider').addEventListener('input', (e) => {
+    month = parseFloat(e.target.value);
+    animating = false;
+    draw();
+});
+
+function toggleAnim() { animating = !animating; if (animating) loop(); }
+
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / cellW);
+    const y = Math.floor((e.clientY - rect.top) / cellH);
+    if (x >=0 && x < cols && y >=0 && y < rows) {
+        const phys = calculatePhysics(x, y, month);
+        let regionInfo = "海洋";
+        if (phys.isLand) {
+            const relativeX = (x - landStartX) / (landEndX - landStartX);
+            let posStr = relativeX < 0.3 ? "西岸" : (relativeX > 0.7 ? "东岸" : "内陆");
+            regionInfo = `大陆${posStr}`;
+        }
+        document.getElementById('debugInfo').innerHTML =
+            `位置: <span style="color:#fff">${Math.abs(Math.round(phys.lat))}°${phys.lat>0?'N':'S'}</span> |
+             区域: <span style="color:#fff">${regionInfo}</span> |
+             瞬时降水指数: <span style="color:${phys.precip>5?'#64B5F6':'#bdc3c7'}">${phys.precip.toFixed(1)}</span> |
+             风向矢量 U:${phys.u.toFixed(1)} V:${phys.v.toFixed(1)}`;
+    }
+});
+
+// 启动
+loop();
+
+</script>
+</body>
+</html>

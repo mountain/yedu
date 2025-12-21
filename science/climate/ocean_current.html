@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>理想大洋环流模型：风应力与西边界强化</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #001f3f; color: #fff; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h2 { margin-bottom: 5px; color: #7FDBFF; }
+        .subtitle { font-size: 0.9em; color: #aaa; margin-bottom: 20px; }
+        canvas { background: #001f3f; border-radius: 4px; box-shadow: 0 0 20px rgba(0,255,255,0.1); cursor: crosshair; }
+        .controls { margin-top: 15px; display: flex; gap: 20px; background: rgba(255,255,255,0.1); padding: 10px 20px; border-radius: 20px; }
+        .legend { margin-top: 15px; font-size: 12px; display: flex; gap: 15px; color: #ddd; }
+        .legend-item span { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 50%; }
+        #debug { font-family: monospace; margin-top: 10px; color: #7FDBFF; min-height: 20px; }
+    </style>
+</head>
+<body>
+
+    <h2>理想大洋环流模型 (Wind-Driven Circulation)</h2>
+    <div class="subtitle">基于 Stommel 模型演示：西边界强化(黑潮/湾流) vs 东边界寒流</div>
+
+    <canvas id="oceanCanvas" width="800" height="500"></canvas>
+
+    <div class="controls">
+        <label><input type="checkbox" id="showVectors" checked> 显示流线矢量</label>
+        <label><input type="checkbox" id="showTemp" checked> 显示温度着色</label>
+        <button onclick="resetParticles()">🔄 重置粒子</button>
+    </div>
+
+    <div class="legend">
+        <div class="legend-item"><span style="background:#ff3333"></span>暖流 (西边界/赤道)</div>
+        <div class="legend-item"><span style="background:#33ccff"></span>寒流 (东边界/极地)</div>
+        <div class="legend-item"><span style="background:#888"></span>大陆</div>
+    </div>
+
+    <div id="debug">鼠标悬停查看流速与性质...</div>
+
+<script>
+const canvas = document.getElementById('oceanCanvas');
+const ctx = canvas.getContext('2d');
+const width = 800;
+const height = 500;
+
+// 模拟参数
+const particles = [];
+const numParticles = 2500;
+const cols = 80;
+const rows = 50;
+const cellW = width / cols;
+const cellH = height / rows;
+
+// 大陆定义 (这次大陆在中间，两边是海，模拟大西洋或太平洋)
+// 为了演示洋流环流，我们需要一个闭合的大洋盆地。
+// 让我们设定：左边是"欧亚大陆东岸"，右边是"北美大陆西岸"。
+// 所以中间是一片大洋。
+const oceanWidth = width * 0.8;
+const oceanStart = width * 0.1;
+const oceanEnd = width * 0.9;
+
+// 预计算流场 (Velocity Field)
+const field = new Array(cols * rows).fill(null);
+
+function initField() {
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const px = x * cellW;
+            const py = y * cellH;
+
+            // 归一化坐标 (0 到 1) 用于计算 Stommel 解
+            // 仅在海洋区域计算
+            let u = 0, v = 0;
+            let isOcean = false;
+
+            if (px > oceanStart && px < oceanEnd) {
+                isOcean = true;
+                // 归一化大洋坐标 X (0=西边界, 1=东边界)
+                const nx = (px - oceanStart) / (oceanEnd - oceanStart);
+                // 归一化纬度 Y (0=南极, 0.5=赤道, 1=北极)
+                const ny = 1 - (py / height);
+                const lat = (ny - 0.5) * 180; // -90 ~ 90
+
+                // --- Stommel 模型核心逻辑 ---
+                // 我们构建两个 Gyre (环流圈)
+                // 北半球副热带 (15-45N): 顺时针
+                // 北半球副极地 (45-75N): 逆时针
+                // 赤道系统 (0-15N)
+
+                let amplitude = 0;
+                let direction = 0; // 1 = Clockwise, -1 = Counter
+
+                // 定义区域强度
+                if (lat > 10 && lat < 50) { // 副热带环流 (Subtropical Gyre)
+                    amplitude = Math.sin(((lat - 10) / 40) * Math.PI);
+                    direction = 1; // 顺时针
+                } else if (lat >= 50 && lat < 80) { // 副极地环流 (Subpolar Gyre)
+                    amplitude = Math.sin(((lat - 50) / 30) * Math.PI) * 0.6; // 弱一点
+                    direction = -1; // 逆时针
+                } else if (lat > -50 && lat < -10) { // 南半球副热带
+                    amplitude = Math.sin(((Math.abs(lat) - 10) / 40) * Math.PI);
+                    direction = -1; // 南半球反气旋是逆时针
+                }
+
+                if (amplitude > 0) {
+                    // Stommel 西边界强化因子
+                    // f(x) = (1 - x/L) - e^(-x/epsilon)
+                    // 简单模拟：西边流速极大，指数衰减
+
+                    // 基础环流 (Sverdrup 内部解 - 线性变化)
+                    // const baseFlow = Math.sin(nx * Math.PI);
+
+                    // 强化后的流函数 Psi
+                    // 这里的数学不必太严谨，关键是形态：
+                    // 西边(nx接近0)梯度大，东边梯度小
+                    const intensification = 0.05; // 越小越强化
+                    const stommelX = (1 - Math.exp(-nx/intensification)) - nx;
+
+                    // Psi = Amplitude(y) * Structure(x)
+                    // u = -dPsi/dy, v = dPsi/dx
+
+                    // 简化：直接构造速度场
+                    // 西边界强北向流 (Western Boundary Current)
+                    const westJet = Math.exp(-nx / 0.08) * 4.0;
+                    // 内部回流 (Sverdrup Interior)
+                    const returnFlow = -0.3; // 缓慢向南回流
+
+                    // 经向速度 V (南北)
+                    let baseV = (westJet + returnFlow);
+
+                    // 纬向速度 U (东西) - 保持质量守恒(div V = 0)的近似
+                    // 在环流顶部和底部转弯
+                    let baseU = 0;
+
+                    // 顶部转弯向东
+                    // 底部转弯向西
+                    // 这里用简单的旋转逻辑叠加
+
+                    // 让我们用一个更直观的矢量旋转法：
+                    // 中心点
+                    let cx = 0.5; // 大洋中心
+                    if (direction === 1) cx = 0.15; // 顺时针环流中心极度偏西!
+                    else cx = 0.15; // 逆时针环流中心也偏西
+
+                    const dx = nx - cx;
+                    // Y轴中心根据环流带调整
+                    let cy_lat = 0;
+                    if (lat > 0) cy_lat = (lat > 45) ? 65 : 30;
+                    else cy_lat = -30;
+
+                    const cy = (cy_lat + 90) / 180;
+                    const dy = (ny - cy) * 2.0; // Y轴拉伸一下
+
+                    // 基础旋转 velocity
+                    // v_tan = r * dir
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    let speed = amplitude * 2 * Math.exp(-dist * 2);
+
+                    // 叠加西边界强化特征
+                    // 如果在西边 (nx < 0.1), v 分量极大
+                    if (nx < 0.1) speed *= (3.0 / (nx + 0.05));
+
+                    // 计算 u, v
+                    // 顺时针: (y, -x)
+                    // 西边界强化导致流线压缩
+                    // 我们手动构建：
+                    // 西边界(nx<0.1): 强 V
+                    // 其他: 弱 V, 中等 U
+
+                    if (direction === 1) { // 北半球副热带 (顺时针)
+                        // 西岸北上
+                        if (nx < 0.15) { u = 0.5 * nx; v = 5.0 * (1-ny)*Math.exp(-nx/0.05); }
+                        // 北部东行 (西风漂流)
+                        else if (lat > 40) { u = 3.0; v = -0.5; }
+                        // 东岸南下 (加利福尼亚寒流 - 慢)
+                        else if (nx > 0.8) { u = -0.2; v = -1.0; }
+                        // 南部西行 (北赤道暖流)
+                        else if (lat < 20) { u = -2.5; v = 0.2; }
+                        // 中间
+                        else { u = 0.2; v = -0.2; }
+                    } else if (direction === -1 && lat > 0) { // 北半球副极地 (逆时针)
+                        // 西岸南下 (亲潮)
+                        if (nx < 0.15) { u = 0.5; v = -3.0 * Math.exp(-nx/0.05); }
+                        // 南部东行
+                        else if (lat < 55) { u = 2.0; v = 0.5; }
+                        // 顶部西行 (极地东风)
+                        else { u = -1.0; v = -0.5; }
+                    } else { // 南半球 (逆时针)
+                         // 西岸南下 (巴西/东澳暖流) - 强
+                        if (nx < 0.15) { u = 0.5; v = -5.0 * Math.exp(-nx/0.05); }
+                        // 南部东行 (西风漂流) - 极强
+                        else if (lat < -40) { u = 5.0; v = 0.1; }
+                        // 东岸北上 (秘鲁/本吉拉寒流) - 慢
+                        else if (nx > 0.8) { u = -0.5; v = 1.5; }
+                        // 北部西行 (南赤道暖流)
+                        else { u = -2.5; v = -0.2; }
+                    }
+                }
+
+                // 赤道逆流 (Doldrums)
+                if (Math.abs(lat) < 5) {
+                    u = 3.0; v = 0;
+                }
+            }
+
+            field[y * cols + x] = { u, v, isOcean, lat: 90 - (y/rows)*180 };
+        }
+    }
+}
+
+// 粒子系统
+class Particle {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        // 随机分布在海洋区域
+        this.x = oceanStart + Math.random() * (oceanEnd - oceanStart);
+        this.y = Math.random() * height;
+        const distFromEquator = Math.abs(this.y - height / 2);
+        const maxDist = height / 2;
+        this.temp = 1 - (distFromEquator / maxDist);
+        this.age = 0;
+        this.life = 200 + Math.random() * 200;
+    }
+
+    update() {
+        const c = Math.floor(this.x / cellW);
+        const r = Math.floor(this.y / cellH);
+
+        if (c >= 0 && c < cols && r >= 0 && r < rows) {
+            const f = field[r * cols + c];
+            if (f && f.isOcean) {
+                this.x += f.u;
+                this.y -= f.v; // Canvas Y is inverted relative to North
+
+                // 温度平流 (Advection)
+                // 粒子试图适应当前纬度的“环境温度”，但有滞后性（热惯性）
+                // 这导致了：从赤道来的水在到了高纬度依然是暖的（暖流）
+                // 从极地来的水到了低纬度依然是冷的（寒流）
+                const distFromEquator = Math.abs(this.y - height / 2);
+                const maxDist = height / 2;
+                const ambientTemp = 1 - (distFromEquator / maxDist);
+                // 关键参数：热交换速率。越慢，暖流延伸越远
+                const heatExchangeRate = 0.01;
+                this.temp = this.temp * (1 - heatExchangeRate) + ambientTemp * heatExchangeRate;
+
+            } else {
+                this.reset(); // Hit land
+            }
+        } else {
+            this.reset(); // Out of bounds
+        }
+
+        this.age++;
+        if (this.age > this.life) this.reset();
+
+        // Wrap around vertically just in case
+        if (this.y < 0) this.y = height;
+        if (this.y > height) this.y = 0;
+    }
+
+    draw() {
+        // Color based on temp
+        // Blue (0) -> Cyan -> Green -> Yellow -> Red (1)
+        // Simple HSL: Blue is 240, Red is 0.
+        // Let's map 0->240 (Cold), 1->0 (Warm)
+
+        // 视觉修正：让寒流更蓝，暖流更红
+        let hue = 240 - (this.temp * 240);
+        // Saturation
+        ctx.fillStyle = `hsla(${hue}, 80%, 50%, 0.6)`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function initParticles() {
+    for(let i=0; i<numParticles; i++) particles.push(new Particle());
+}
+
+function resetParticles() {
+    particles.forEach(p => p.reset());
+}
+
+function drawMap() {
+    // Draw Continents
+    ctx.fillStyle = "#222";
+    // Left Continent (Asia/Australia)
+    ctx.fillRect(0, 0, oceanStart, height);
+    // Right Continent (Americas)
+    ctx.fillRect(oceanEnd, 0, width - oceanEnd, height);
+
+    // Draw Latitudes
+    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    ctx.beginPath();
+    [height/2, height*0.25, height*0.75].forEach(y => {
+        ctx.moveTo(oceanStart, y); ctx.lineTo(oceanEnd, y);
+    });
+    ctx.stroke();
+
+    // Text
+    ctx.fillStyle = "#555";
+    ctx.fillText("West Continent (e.g. Asia)", 10, height/2);
+    ctx.fillText("East Continent (e.g. USA)", oceanEnd + 10, height/2);
+    ctx.fillText("30°N", oceanEnd - 40, height*0.25 - 5);
+    ctx.fillText("0°", oceanEnd - 40, height*0.5 - 5);
+}
+
+function drawVectors() {
+    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    for (let y = 2; y < rows; y+=2) {
+        for (let x = 0; x < cols; x+=2) {
+            const f = field[y * cols + x];
+            if (f && f.isOcean && (Math.abs(f.u) > 0.1 || Math.abs(f.v) > 0.1)) {
+                const px = x * cellW + cellW/2;
+                const py = y * cellH + cellH/2;
+                ctx.beginPath();
+                ctx.moveTo(px, py);
+                ctx.lineTo(px + f.u * 4, py - f.v * 4);
+                ctx.stroke();
+            }
+        }
+    }
+}
+
+function animate() {
+    // Trail effect
+    ctx.fillStyle = "rgba(0, 31, 63, 0.2)"; // Ocean dark blue background
+    ctx.fillRect(oceanStart, 0, oceanEnd-oceanStart, height);
+
+    // Re-draw map overlay boundaries
+    ctx.fillStyle = "#111"; // Land color
+    ctx.fillRect(0, 0, oceanStart, height);
+    ctx.fillRect(oceanEnd, 0, width - oceanEnd, height);
+
+    if (document.getElementById('showVectors').checked) {
+        drawVectors();
+    }
+
+    particles.forEach(p => {
+        p.update();
+        if (document.getElementById('showTemp').checked) {
+            p.draw();
+        } else {
+             ctx.fillStyle = "rgba(200,200,255,0.6)";
+             ctx.beginPath(); ctx.arc(p.x, p.y, 1.5, 0, Math.PI*2); ctx.fill();
+        }
+    });
+
+    requestAnimationFrame(animate);
+}
+
+// 交互
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (x > oceanStart && x < oceanEnd) {
+        const c = Math.floor(x / cellW);
+        const r = Math.floor(y / cellH);
+        const f = field[r*cols+c];
+        if (f) {
+            let type = "";
+            if (f.v > 1.0) type = "快速北向暖流 (如黑潮/湾流)";
+            else if (f.v < -0.5 && x > width/2) type = "缓慢南向寒流 (如加州/加那利)";
+            else if (Math.abs(f.lat) < 5) type = "赤道流系";
+            else if (Math.abs(f.u) > 2) type = "西风漂流";
+
+            document.getElementById('debug').innerHTML =
+                `Lat: ${f.lat.toFixed(1)} | U: ${f.u.toFixed(1)} V: ${f.v.toFixed(1)} | ${type}`;
+        }
+    } else {
+        document.getElementById('debug').innerHTML = "陆地";
+    }
+});
+
+// Start
+initField();
+initParticles();
+animate();
+
+</script>
+</body>
+</html>
